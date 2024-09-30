@@ -1,8 +1,16 @@
 from enum import Enum
+from stat import S_ISLNK, S_ISREG, ST_MODE
 import sys
 import os
 import zlib
 import hashlib
+
+
+class Path:
+    ROOT = '.git'
+    OBJECTS = f'{ROOT}/objects'
+    REFS = f'{ROOT}/refs'
+    HEAD = f'{ROOT}/HEAD'
 
 
 def _read_object(hash: str) -> bytes:
@@ -18,15 +26,6 @@ def _write_object(hash: str, data: bytes):
         f.write(zlib.compress(data))
 
 
-def _prepare_blob(content: str) -> bytes:
-    data = bytearray()
-    data.extend(b'blob ')
-    data.extend(str(len(content)).encode())
-    data.append(0)
-    data.extend(content)
-    return data
-
-
 def _parse_number(data, offset) -> tuple[int, int]:
     val = 0 
     while chr(data[offset]).isdigit():
@@ -35,33 +34,28 @@ def _parse_number(data, offset) -> tuple[int, int]:
         offset += 1
     return (val, offset)
 
+def _obj_data(prefix: str, content: str | bytearray) -> bytearray:
+    data = bytearray()
+    if type(content) == bytearray:
+        bcontent = content
+    else:
+        bcontent = content.encode()
+    data.extend(prefix.encode())
+    data.append(ord(' '))
+    data.extend(str(len(bcontent)).encode())
+    data.append(0)
+    data.extend(bcontent)
+    return data
 
-class Path:
-    ROOT = '.git'
-    OBJECTS = f'{ROOT}/objects'
-    REFS = f'{ROOT}/refs'
-    HEAD = f'{ROOT}/HEAD'
 
-
-class GitObjectType(Enum):
-    BLOB = 1
-    TREE = 2
-
-
-class GitBlob:
-    def __init__(self, content: str):
-        self.content = content
-
-    @staticmethod
-    def from_bytes(data: bytearray):
-        assert(data.startswith(b'blob '))
-
-        offset = len(b'blob ')
-        (l, offset) = _parse_number(data, offset)
-        # skip \0
-        offset += 1
-        content = data[offset: offset + l]
-        return GitBlob(content.decode())
+def _entry_data(mode: str, name: str, hash: str) -> bytearray:
+    data = bytearray()
+    data.extend(mode.encode())
+    data.append(ord(' '))
+    data.extend(name.encode())
+    data.append(0)
+    data.extend(bytes.fromhex(hash))
+    return data
 
 
 class GitTreeObjectMode(Enum):
@@ -71,39 +65,79 @@ class GitTreeObjectMode(Enum):
     SYMBOLIC_FILE = 120000
 
 
-class GitTreeObject:
-    def __init__(self, mode: int, name: str, hash: str):
-        self.mode = GitTreeObjectMode(mode)
+class GitBlob:
+    def __init__(self, content: str):
+        self.content = content
+
+    def write(self) -> bytes:
+        data = _obj_data('blob', self.content)
+        hash = hashlib.sha1(data).hexdigest()
+        _write_object(hash, data)
+        return hash
+    
+    @staticmethod
+    def read(hash: bytearray):
+        data = _read_object(hash)
+        assert(data.startswith(b'blob '))
+        offset = len(b'blob ')
+        (l, offset) = _parse_number(data, offset)
+        # skip \0
+        offset += 1
+        content = data[offset: offset + l]
+        return GitBlob(content.decode())
+
+
+class GitTreeEntry:
+    def __init__(self, mode: GitTreeObjectMode, name: str, hash: str):
+        self.mode = mode
         self.name = name 
         self.hash = hash
-        data = _read_object(hash)
-        self.obj = GitTree.from_bytes(data) if mode == GitTreeObjectMode.DIRECTORY.value else GitBlob.from_bytes(data)
 
     def __repr__(self):
         return self.pformat(name_only=False)
-    
+
     def pformat(self, name_only=False):
         if name_only:
             return self.name
         else:
             return f"{self.mode.value:06} {self.name} {self.hash}"
+    
+    def load(self): 
+        return GitTree.read(hash) if self.mode == GitTreeObjectMode.DIRECTORY else GitBlob.read(hash) 
 
+    def encode(self) -> bytes:
+        return _entry_data(str(self.mode.value), self.name, self.hash)
 
 
 class GitTree:
-    def __init__(self, objs: list[GitTreeObject]):
-        self.objs = objs 
+    def __init__(self, entries: list[GitTreeEntry]):
+        self.entries = entries
     
-    @staticmethod
-    def from_bytes(data: bytearray):
+    def __repr__(self):
+        return self.pformat(name_only=False)
+    
+    def pformat(self, name_only=False):
+        return '\n'.join([x.pformat(name_only) for x in self.entries])
+    
+    def write(self) -> bytes:
+        body = bytearray()
+        for entry in self.entries:
+            body.extend(entry.encode())
+        data = _obj_data('tree', body)
+        hash = hashlib.sha1(data).hexdigest()
+        _write_object(hash, data)
+        return hash
+
+    @staticmethod 
+    def read(hash: bytearray):
+        data = _read_object(hash)
         assert(data.startswith(b'tree '))
 
         offset = len(b'tree ')
         (l, offset) = _parse_number(data, offset)
         # skip \0
         offset += 1
-        
-        objs = []
+        entries = []
         i = offset 
         while i < offset + l:
             mode = int(data[i: i + 6].decode())
@@ -113,20 +147,11 @@ class GitTree:
             while data[j] != 0:
                 j += 1
             name = data[i: j].decode()
-
             i = j + 1
             hash = data[i: i + 20]
-
             i += 20
-            objs.append(GitTreeObject(mode, name, hash.hex()))
-
-        return GitTree(objs)
-    
-    def __repr__(self):
-        return self.pformat(name_only=False)
-    
-    def pformat(self, name_only=False):
-        return '\n'.join([x.pformat(name_only) for x in self.objs])
+            entries.append(GitTreeEntry(GitTreeObjectMode(mode), name, hash.hex()))
+        return GitTree(entries)
 
 
 def init(_: list[any]):
@@ -139,49 +164,54 @@ def init(_: list[any]):
 
 
 def cat_file(argv: list[any]):
-    def _parse_number(data, offset) -> tuple[int, int]:
-        val = 0 
-        while chr(data[offset]).isdigit():
-            val *= 10 
-            val += int(chr(data[offset]))
-            offset += 1
-        return (val, offset)
-    
-    def _parse_blob(data: bytes) -> str:
-        offset = 5
-        (l, offset) = _parse_number(data, offset)
-        # skip \0
-        offset += 1
-        content = data[offset: offset + l]
-        return content.decode()
-
     blob_sha1 = argv[3] 
-    data = _read_object(blob_sha1)
-
-    if data.startswith(b'blob '):
-        content = _parse_blob(data)
-        print(content, end='')
+    blob = GitBlob.read(blob_sha1)
+    print(blob.content, end='')
 
 
 def hash_object(argv: list[any]):
     path = argv[3]
-    
     with open(path, 'rb') as f:
         content = f.read()
     
-    data = _prepare_blob(content)
-    hash = hashlib.sha1(data).hexdigest()
-    
-    _write_object(hash, data)
+    blob = GitBlob(content.decode())
+    hash = blob.write()
     print(hash, end='')
 
 
 def ls_tree(argv: list[any]):
     hash = argv[3]
-
-    data = _read_object(hash)
-    tree = GitTree.from_bytes(data)
+    tree = GitTree.read(hash)
     print(tree.pformat(name_only=True))
+
+
+def write_tree(argv: list[any]):
+    def _create_tree(path) -> GitTree:
+        entries = []
+        for x in sorted(os.listdir(path)):
+            fp = f'{path}/{x}'
+            if x == '.git':
+                continue 
+            if os.path.isdir(fp):
+                tree = _create_tree(fp)
+                entries.append(GitTreeEntry(GitTreeObjectMode.DIRECTORY, x, tree.write()))
+            else:
+                with open(fp, 'rb') as f:
+                    content = f.read()
+                blob = GitBlob(content.decode())
+                mode = os.stat(fp)[ST_MODE]
+                filemode = GitTreeObjectMode.EXECUTABLE_FILE
+                if S_ISLNK(mode):
+                    filemode = GitTreeObjectMode.SYMBOLIC_FILE 
+                if S_ISREG(mode):
+                    filemode = GitTreeObjectMode.REGULAR_FILE
+                entries.append(GitTreeEntry(filemode, x, blob.write()))
+        tree = GitTree(entries)
+        return tree
+
+    tree = _create_tree('.')
+    hash = tree.write()
+    print(hash, end='')
 
 
 def main():
@@ -191,6 +221,7 @@ def main():
         "cat-file": cat_file,
         "hash-object": hash_object,
         "ls-tree": ls_tree,
+        "write-tree": write_tree,
     }[cmd](sys.argv)
 
 
