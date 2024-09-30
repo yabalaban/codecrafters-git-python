@@ -1,6 +1,7 @@
 import sys
 import os
 import zlib
+import hashlib
 
 
 class Path:
@@ -8,6 +9,28 @@ class Path:
     OBJECTS = f'{ROOT}/objects'
     REFS = f'{ROOT}/refs'
     HEAD = f'{ROOT}/HEAD'
+
+
+def _read_object(hash: str) -> bytes:
+    pref, suff = hash[:2], hash[2:]
+    with open(f'{Path.OBJECTS}/{pref}/{suff}', 'rb') as f:
+        return zlib.decompress(f.read())
+
+
+def _write_object(hash: str, data: bytes):
+    pref, suff = hash[:2], hash[2:]
+    os.makedirs(f'{Path.OBJECTS}/{pref}', exist_ok=True)
+    with open(f'{Path.OBJECTS}/{pref}/{suff}', 'wb+') as f:
+        f.write(zlib.compress(data))
+
+
+def _prepare_blob(content: str) -> bytes:
+    data = bytearray()
+    data.extend(b'blob ')
+    data.extend(str(len(content)).encode())
+    data.append(0)
+    data.extend(content)
+    return data
 
 
 def init(_: list[any]):
@@ -20,34 +43,49 @@ def init(_: list[any]):
 
 
 def cat_file(argv: list[any]):
-    def parse_number(content, offset) -> tuple[int, int]:
+    def _parse_number(data, offset) -> tuple[int, int]:
         val = 0 
-        while chr(content[offset]).isdigit():
+        while chr(data[offset]).isdigit():
             val *= 10 
-            val += int(chr(content[offset]))
+            val += int(chr(data[offset]))
             offset += 1
         return (val, offset)
-
-    blob_sha1 = argv[3] 
-    pref, suff = blob_sha1[:2], blob_sha1[2:]
-
-    with open(f'{Path.OBJECTS}/{pref}/{suff}', 'rb') as f:
-        blob = f.read()
     
-    content = zlib.decompress(blob)
-    if content.startswith(b'blob '):
+    def _parse_blob(data: bytes) -> str:
         offset = 5
-        (l, offset) = parse_number(content, offset)
+        (l, offset) = _parse_number(data, offset)
         # skip \0
         offset += 1
-        data = content[offset: offset + l]
-        print(data.decode(), end='')
+        content = data[offset: offset + l]
+        return content.decode()
+
+    blob_sha1 = argv[3] 
+    data = _read_object(blob_sha1)
+
+    if data.startswith(b'blob '):
+        content = _parse_blob(data)
+        print(content, end='')
+
+
+def hash_object(argv: list[any]):
+    path = argv[3]
+    
+    with open(path, 'rb') as f:
+        content = f.read()
+    
+    data = _prepare_blob(content)
+    hash = hashlib.sha1(data).hexdigest()
+    
+    _write_object(hash, data)
+    print(hash, end='')
+
 
 def main():
     cmd = sys.argv[1]
     {
         "init": init,
-        "cat-file": cat_file
+        "cat-file": cat_file,
+        "hash-object": hash_object,
     }[cmd](sys.argv)
 
 
