@@ -154,6 +154,30 @@ class GitTree:
         return GitTree(entries)
 
 
+class GitCommitTree:
+    def __init__(self, tree_sha: str, commit_sha: str, message: str):
+        self.tree_sha = tree_sha 
+        self.commit_sha = commit_sha
+        self.message = message 
+    
+    def write(self) -> bytes:
+        body = bytearray()
+        body.extend(b'tree ')
+        body.extend(self.tree_sha.encode())
+        body.extend(b'\n')
+        body.extend(b'parent ')
+        body.extend(self.commit_sha.encode())
+        body.extend(b'\n')
+        body.extend(b'author yabalaban <hahahoho@gmail.com> 1727729150 +0000\n')
+        body.extend(b'committer nabalabay <hohohaha@gmail.com> 1727729150 +0000\n\n')
+        body.extend(self.message.encode())
+        body.extend(b'\n')
+        data = _obj_data('commit', body)
+        hash = hashlib.sha1(data).hexdigest()
+        _write_object(hash, data)
+        return hash
+
+
 def init(_: list[any]):
     os.mkdir(Path.ROOT)
     os.mkdir(Path.OBJECTS)
@@ -214,6 +238,14 @@ def write_tree(argv: list[any]):
     print(hash, end='')
 
 
+def commit_tree(argv: list[any]):
+    tree_sha = argv[2]
+    commit_sha = argv[4]
+    message = argv[6]
+    commit = GitCommitTree(tree_sha, commit_sha, message)
+    print(commit.write(), end='')
+
+
 def main():
     cmd = sys.argv[1]
     {
@@ -222,6 +254,7 @@ def main():
         "hash-object": hash_object,
         "ls-tree": ls_tree,
         "write-tree": write_tree,
+        "commit-tree": commit_tree,
     }[cmd](sys.argv)
 
 
